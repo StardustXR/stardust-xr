@@ -24,15 +24,14 @@ use crate::{
 	spatial::Spatial,
 	HandlerWrapper,
 };
-
 use mint::{Quaternion, Vector3};
-use parking_lot::Mutex;
 use serde::Deserialize;
 use stardust_xr::{
-	schemas::flex::{deserialize, flexbuffers},
+	schemas::flex::{deserialize_owned, flexbuffers},
 	values::Transform,
 };
 use std::{ops::Deref, os::fd::OwnedFd, sync::Arc};
+use tokio::sync::Mutex;
 
 #[cfg(feature = "keymap")]
 use crate::client::Client;
@@ -97,9 +96,15 @@ impl Client {
 }
 
 /// Trait for handling when pulse receivers matching the sender's mask are created/destroyed on the server.
+#[crate::handler]
 pub trait PulseSenderHandler: Send + Sync {
-	fn new_receiver(&mut self, info: NewReceiverInfo, receiver: PulseReceiver, field: UnknownField);
-	fn drop_receiver(&mut self, uid: &str);
+	async fn new_receiver(
+		&mut self,
+		info: NewReceiverInfo,
+		receiver: PulseReceiver,
+		field: UnknownField,
+	);
+	async fn drop_receiver(&mut self, uid: String);
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -184,32 +189,40 @@ impl PulseSender {
 		})
 	}
 
-	fn handle_new_receiver<H: PulseSenderHandler>(
+	fn handle_new_receiver<H: PulseSenderHandler + 'static>(
 		sender: Arc<PulseSender>,
 		handler: Arc<Mutex<H>>,
-		data: &[u8],
+		data: Vec<u8>,
 		_fds: Vec<OwnedFd>,
 	) -> color_eyre::eyre::Result<()> {
 		let client = sender.client()?;
-		let info: NewReceiverInfo = deserialize(data)?;
+		let info: NewReceiverInfo = deserialize_owned(data)?;
 		let receiver = PulseReceiver {
 			spatial: Spatial::from_path(&client, sender.node().get_path()?, &info.uid, false),
 		};
 		let field = UnknownField {
 			spatial: Spatial::from_path(&client, receiver.node().get_path()?, "field", false),
 		};
-		handler.lock().new_receiver(info, receiver, field);
+		tokio::task::spawn(async move {
+			handler
+				.lock()
+				.await
+				.new_receiver(info, receiver, field)
+				.await;
+		});
 		Ok(())
 	}
 
-	fn handle_drop_receiver<H: PulseSenderHandler>(
+	fn handle_drop_receiver<H: PulseSenderHandler + 'static>(
 		_sender: Arc<PulseSender>,
 		handler: Arc<Mutex<H>>,
-		data: &[u8],
+		data: Vec<u8>,
 		_fds: Vec<OwnedFd>,
 	) -> color_eyre::eyre::Result<()> {
-		let uid: &str = deserialize(data)?;
-		handler.lock().drop_receiver(uid);
+		let uid: String = deserialize_owned(data)?;
+		tokio::task::spawn(async move {
+			handler.lock().await.drop_receiver(uid).await;
+		});
 		Ok(())
 	}
 
@@ -267,9 +280,10 @@ impl std::ops::Deref for PulseSender {
 }
 
 /// Trait for handling when data is sent to this pulse receiver.
+#[crate::handler]
 pub trait PulseReceiverHandler: Send + Sync {
 	/// `data` and `data_reader` point to the same data, so feel free to use one or the other.
-	fn data(&mut self, uid: &str, data: &[u8], data_reader: flexbuffers::MapReader<&[u8]>);
+	async fn data(&mut self, uid: String, data: Vec<u8>);
 }
 
 /// Node to receive non-spatial data through 3D space.
@@ -279,7 +293,7 @@ pub trait PulseReceiverHandler: Send + Sync {
 /// use stardust_xr_fusion::data::PulseReceiverHandler;
 /// struct PulseReceiverTest;
 /// impl PulseReceiverHandler for PulseReceiverTest {
-/// 	fn data(&mut self, uid: &str, data: &[u8], _data_reader: flexbuffers::MapReader<&[u8]>) {
+/// 	fn data(&mut self, uid: &str, data: Vec<u8>) {
 /// 		println!(
 /// 			"Pulse sender {} sent {}",
 /// 			uid,
@@ -366,16 +380,14 @@ impl PulseReceiver {
 
 		handler_wrapper.add_handled_signal("data", move |_receiver, handler, data, _fds| {
 			#[derive(Deserialize)]
-			struct SendDataInfo<'a> {
-				uid: &'a str,
+			struct SendDataInfo {
+				uid: String,
 				data: Vec<u8>,
 			}
-			let info: SendDataInfo = deserialize(data)?;
-			let data_reader =
-				flexbuffers::Reader::get_root(info.data.as_slice()).and_then(|f| f.get_map())?;
-			handler
-				.lock()
-				.data(info.uid, info.data.as_slice(), data_reader);
+			let info: SendDataInfo = deserialize_owned(data)?;
+			tokio::task::spawn(async move {
+				handler.lock().await.data(info.uid, info.data).await;
+			});
 			Ok(())
 		})?;
 
@@ -411,12 +423,13 @@ async fn fusion_pulses() {
 		.expect("Couldn't connect");
 
 	struct PulseReceiverTest(Arc<Client>);
+	#[crate::handler]
 	impl PulseReceiverHandler for PulseReceiverTest {
-		fn data(&mut self, uid: &str, data: &[u8], _data_reader: flexbuffers::MapReader<&[u8]>) {
+		async fn data(&mut self, uid: String, data: Vec<u8>) {
 			println!(
 				"Pulse sender {} sent {}",
 				uid,
-				flexbuffers::Reader::get_root(data).unwrap()
+				flexbuffers::Reader::get_root(data.as_slice()).unwrap()
 			);
 			self.0.stop_loop();
 		}
@@ -425,8 +438,9 @@ async fn fusion_pulses() {
 		data: Vec<u8>,
 		node: PulseSender,
 	}
+	#[crate::handler]
 	impl PulseSenderHandler for PulseSenderTest {
-		fn new_receiver(
+		async fn new_receiver(
 			&mut self,
 			info: NewReceiverInfo,
 			receiver: PulseReceiver,
@@ -440,7 +454,7 @@ async fn fusion_pulses() {
 			);
 			self.node.send_data(&receiver, &self.data).unwrap();
 		}
-		fn drop_receiver(&mut self, uid: &str) {
+		async fn drop_receiver(&mut self, uid: String) {
 			println!("Pulse receiver {} dropped", uid);
 		}
 	}

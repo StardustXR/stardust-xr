@@ -19,6 +19,7 @@
 #![allow(dead_code)]
 
 pub use stardust_xr as core;
+use tokio::sync::{Mutex, MutexGuard};
 
 #[macro_use]
 pub mod node;
@@ -36,8 +37,9 @@ pub mod spatial;
 use self::node::HandledNodeType;
 use color_eyre::eyre::{anyhow, Result};
 use node::NodeError;
-pub use parking_lot::{Mutex, MutexGuard};
 use std::{os::fd::OwnedFd, sync::Arc};
+
+pub use async_trait::async_trait as handler;
 
 /// A wrapper around a node and a handler struct implementing the node's handler trait.
 /// Necessary because the methods on the handler may be called at any time and bundling the 2 together makes it harder to screw up.
@@ -80,8 +82,8 @@ impl<N: HandledNodeType, H: Send + Sync + 'static> HandlerWrapper<N, H> {
 	///
 	/// # Safety
 	/// Since this is a mutex, it can deadlock.
-	pub fn lock_wrapped(&self) -> MutexGuard<H> {
-		self.wrapped.lock()
+	pub async fn lock_wrapped(&self) -> MutexGuard<H> {
+		self.wrapped.lock().await
 	}
 	/// Get an `Arc<Mutex<_>>` of the handleNamespacedResourced type for portability.
 	///
@@ -94,13 +96,17 @@ impl<N: HandledNodeType, H: Send + Sync + 'static> HandlerWrapper<N, H> {
 	pub(crate) fn add_handled_signal(
 		&self,
 		name: &str,
-		parse: fn(Arc<N>, Arc<Mutex<H>>, &[u8], Vec<OwnedFd>) -> Result<()>,
+		parse: fn(Arc<N>, Arc<Mutex<H>>, Vec<u8>, Vec<OwnedFd>) -> Result<()>,
 	) -> Result<(), NodeError> {
 		let node = Arc::downgrade(&self.node);
 		let handler = Arc::downgrade(&self.wrapped);
 		self.node.node().add_local_signal(name, move |data, fds| {
-			let Some(node) = node.upgrade() else { return Err(anyhow!("Node broken")) };
-			let Some(handler) = handler.upgrade() else { return Err(anyhow!("Handler broken")) };
+			let Some(node) = node.upgrade() else {
+				return Err(anyhow!("Node broken"));
+			};
+			let Some(handler) = handler.upgrade() else {
+				return Err(anyhow!("Handler broken"));
+			};
 			parse(node, handler, data, fds)
 		})
 	}
@@ -108,13 +114,17 @@ impl<N: HandledNodeType, H: Send + Sync + 'static> HandlerWrapper<N, H> {
 	pub(crate) fn add_handled_method(
 		&self,
 		name: &str,
-		parse: fn(Arc<N>, Arc<Mutex<H>>, &[u8], Vec<OwnedFd>) -> Result<(Vec<u8>, Vec<OwnedFd>)>,
+		parse: fn(Arc<N>, Arc<Mutex<H>>, Vec<u8>, Vec<OwnedFd>) -> Result<(Vec<u8>, Vec<OwnedFd>)>,
 	) -> Result<(), NodeError> {
 		let node = Arc::downgrade(&self.node);
 		let handler = Arc::downgrade(&self.wrapped);
 		self.node.node().add_local_method(name, move |data, fds| {
-			let Some(node) = node.upgrade() else { return Err(anyhow!("Node broken")) };
-			let Some(handler) = handler.upgrade() else { return Err(anyhow!("Handler broken")) };
+			let Some(node) = node.upgrade() else {
+				return Err(anyhow!("Node broken"));
+			};
+			let Some(handler) = handler.upgrade() else {
+				return Err(anyhow!("Handler broken"));
+			};
 			parse(node, handler, data, fds)
 		})
 	}
@@ -125,7 +135,9 @@ macro_rules! handle_action {
     ($handler:ident, $action:ident) => {
         $handler
             .add_handled_signal(stringify!($action), |_, handler, _, _| {
-                handler.lock().$action();  // No data deserialization
+                tokio::task::spawn(async move {
+					handler.lock().await.$action().await;
+				});  // No data deserialization
                 Ok(())
             })
             .unwrap();
@@ -134,7 +146,10 @@ macro_rules! handle_action {
     ($handler:ident, $action:ident, $name:ident) => {
         $handler
             .add_handled_signal(stringify!($action), |_, handler, data, _| {
-                handler.lock().$action(deserialize(data)?);
+				let $name = deserialize_owned(data)?;
+                tokio::spawn(async move {
+					handler.lock().await.$action($name).await;
+				});
                 Ok(())
             })
             .unwrap();
@@ -143,10 +158,12 @@ macro_rules! handle_action {
     ($handler:ident, $action:ident, ($( $name:ident ),*)) => {
         $handler
             .add_handled_signal(stringify!($action), |_, handler, data, _| {
-                let ($($name),*,) = deserialize(data)?;
-                handler.lock().$action($(
-                    $name
-                ),*);
+                let ($($name),*,) = deserialize_owned(data)?;
+				tokio::spawn(async move {
+					handler.lock().await.$action($(
+						$name
+					),*).await;
+				});
                 Ok(())
             })
             .unwrap();

@@ -3,12 +3,12 @@ use crate::{
 	spatial::Spatial,
 	HandlerWrapper,
 };
-use parking_lot::Mutex;
 use stardust_xr::{
 	schemas::flex::flexbuffers::{self},
 	values::Transform,
 };
 use std::{ops::Deref, sync::Arc};
+use tokio::sync::Mutex;
 
 use super::{input_method_handler_wrapper, InputMethod, InputMethodHandler};
 
@@ -146,8 +146,9 @@ async fn fusion_tip_input_method() {
 		cursor: Cursor,
 		datamap: Datamap,
 	}
+	#[crate::handler]
 	impl crate::client::RootHandler for TipDemo {
-		fn frame(&mut self, info: FrameInfo) {
+		async fn frame(&mut self, info: FrameInfo) {
 			let (sin, cos) = (info.elapsed as f32).sin_cos();
 			self.tip
 				.set_position(None, mint::Vector3::from([sin * 0.1, 0.0, cos * 0.1]))

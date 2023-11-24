@@ -55,7 +55,7 @@ impl scenegraph::Scenegraph for Scenegraph {
 			.get(method)
 			.ok_or(ScenegraphError::SignalNotFound)?
 			.clone();
-		signal(data, fds).map_err(|e| ScenegraphError::SignalError {
+		signal(data.to_vec(), fds).map_err(|e| ScenegraphError::SignalError {
 			error: e.to_string(),
 		})
 	}
@@ -79,7 +79,7 @@ impl scenegraph::Scenegraph for Scenegraph {
 				.get(method)
 				.ok_or(ScenegraphError::MethodNotFound)?
 				.clone();
-			method(data, fds).map_err(|e| ScenegraphError::MethodError {
+			method(data.to_vec(), fds).map_err(|e| ScenegraphError::MethodError {
 				error: e.to_string(),
 			})
 		};

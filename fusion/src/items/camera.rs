@@ -97,32 +97,34 @@ async fn fusion_camera_ui() {
 	.unwrap();
 
 	struct CameraUIManager(Arc<Client>);
+	#[crate::handler]
 	impl crate::items::ItemUIHandler<CameraItem> for CameraUIManager {
-		fn item_created(&mut self, item_uid: &str, _item: CameraItem, _data: ()) {
+		async fn item_created(&mut self, item_uid: String, _item: CameraItem, _data: ()) {
 			println!("Camera item {item_uid} created");
 		}
-		fn item_captured(&mut self, item_uid: &str, acceptor_uid: &str) {
+		async fn item_captured(&mut self, item_uid: String, acceptor_uid: String) {
 			println!("Capturing environment item {item_uid} in acceptor {acceptor_uid}");
 		}
-		fn item_released(&mut self, item_uid: &str, acceptor_uid: &str) {
+		async fn item_released(&mut self, item_uid: String, acceptor_uid: String) {
 			println!("Released environment item {item_uid} from acceptor {acceptor_uid}");
 		}
-		fn item_destroyed(&mut self, _uid: &str) {}
-		fn acceptor_created(
+		async fn item_destroyed(&mut self, _uid: String) {}
+		async fn acceptor_created(
 			&mut self,
-			_uid: &str,
+			_uid: String,
 			_acceptor: crate::items::ItemAcceptor<CameraItem>,
 			_field: crate::fields::UnknownField,
 		) {
 		}
-		fn acceptor_destroyed(&mut self, _uid: &str) {}
+		async fn acceptor_destroyed(&mut self, _uid: String) {}
 	}
+	#[crate::handler]
 	impl crate::items::ItemAcceptorHandler<CameraItem> for CameraUIManager {
-		fn captured(&mut self, uid: &str, item: CameraItem, _data: ()) {
+		async fn captured(&mut self, uid: String, item: CameraItem, _data: ()) {
 			println!("Item {uid} accepted sucessfully!");
 			item.release().unwrap();
 		}
-		fn released(&mut self, uid: &str) {
+		async fn released(&mut self, uid: String) {
 			println!("Got {uid} released sucessfully!");
 			self.0.stop_loop();
 		}

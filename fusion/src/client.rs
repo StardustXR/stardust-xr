@@ -70,17 +70,19 @@ pub struct FrameInfo {
 }
 
 /// Handle the events that apply to the whole client.
+#[crate::handler]
 pub trait RootHandler: Send + Sync + 'static {
 	/// Runs every frame with information about the current frame, for animations and motion and a consistent update.
-	fn frame(&mut self, _info: FrameInfo);
+	async fn frame(&mut self, info: FrameInfo);
 	/// The server needs your client to save its state so that it can be restored (through Client::get_state) on relaunch. This may happen for any reason.
 	///
 	/// Client root transform is always saved.
 	fn save_state(&mut self) -> ClientState;
 }
 struct DummyHandler;
+#[crate::handler]
 impl RootHandler for DummyHandler {
-	fn frame(&mut self, _info: FrameInfo) {}
+	async fn frame(&mut self, _info: FrameInfo) {}
 	fn save_state(&mut self) -> ClientState {
 		ClientState::default()
 	}
@@ -128,7 +130,7 @@ pub struct Client {
 	pub(crate) registered_item_uis: Mutex<FxHashSet<TypeId>>,
 
 	elapsed_time: Mutex<f64>,
-	life_cycle_handler: Mutex<Weak<Mutex<dyn RootHandler>>>,
+	life_cycle_handler: Mutex<Weak<tokio::sync::Mutex<dyn RootHandler>>>,
 
 	state: watch::Receiver<ClientState>,
 }
@@ -159,7 +161,7 @@ impl Client {
 			registered_item_uis: Mutex::new(FxHashSet::default()),
 
 			elapsed_time: Mutex::new(0.0),
-			life_cycle_handler: Mutex::new(Weak::<Mutex<DummyHandler>>::new()),
+			life_cycle_handler: Mutex::new(Weak::<tokio::sync::Mutex<DummyHandler>>::new()),
 
 			state: state_rx,
 		});
@@ -173,7 +175,7 @@ impl Client {
 			let client = client.clone();
 
 			move |data, _| {
-				let state: ClientStateInternal = deserialize(data)?;
+				let state: ClientStateInternal = deserialize(&data)?;
 				let _ = state_tx.send(ClientState {
 					data: state.data,
 					root: Some(client.get_root().alias()),
@@ -195,14 +197,16 @@ impl Client {
 						delta: f64,
 					}
 
-					let info_internal: LogicStepInfoInternal = deserialize(data)?;
+					let info_internal: LogicStepInfoInternal = deserialize(&data)?;
 					let mut elapsed = client.elapsed_time.lock();
 					(*elapsed) += info_internal.delta;
 					let info = FrameInfo {
 						delta: info_internal.delta,
 						elapsed: *elapsed,
 					};
-					handler.lock().frame(info);
+					tokio::spawn(async move {
+						handler.lock().await.frame(info).await;
+					});
 				}
 				Ok(())
 			}
@@ -214,7 +218,7 @@ impl Client {
 					.life_cycle_handler
 					.lock()
 					.upgrade()
-					.map(|h| h.lock().save_state())
+					.map(|h| h.blocking_lock().save_state())
 					.as_ref()
 					.map(ClientState::to_internal)
 					.unwrap_or_default();
@@ -279,22 +283,28 @@ impl Client {
 
 	/// Wrap the root in a handler and return an `Arc` to the handler.
 	#[must_use = "Dropping this handler wrapper would immediately drop the handler, and you want to check for errors too"]
-	pub fn wrap_root<H: RootHandler>(&self, wrapped: H) -> Result<Arc<Mutex<H>>, NodeError> {
+	pub fn wrap_root<H: RootHandler>(
+		&self,
+		wrapped: H,
+	) -> Result<Arc<tokio::sync::Mutex<H>>, NodeError> {
 		self.get_root()
 			.node
 			.send_remote_signal_raw("subscribe_frame", &[], Vec::new())?;
-		let wrapped = Arc::new(Mutex::new(wrapped));
+		let wrapped = Arc::new(tokio::sync::Mutex::new(wrapped));
 		*self.life_cycle_handler.lock() =
-			Arc::downgrade(&(wrapped.clone() as Arc<Mutex<dyn RootHandler>>));
+			Arc::downgrade(&(wrapped.clone() as Arc<tokio::sync::Mutex<dyn RootHandler>>));
 		Ok(wrapped)
 	}
 	/// Wrap the root in an already wrapped handler
-	pub fn wrap_root_raw<H: RootHandler>(&self, wrapped: &Arc<Mutex<H>>) -> Result<(), NodeError> {
+	pub fn wrap_root_raw<H: RootHandler>(
+		&self,
+		wrapped: &Arc<tokio::sync::Mutex<H>>,
+	) -> Result<(), NodeError> {
 		self.get_root()
 			.node
 			.send_remote_signal_raw("subscribe_frame", &[], Vec::new())?;
 		*self.life_cycle_handler.lock() =
-			Arc::downgrade(&(wrapped.clone() as Arc<Mutex<dyn RootHandler>>));
+			Arc::downgrade(&(wrapped.clone() as Arc<tokio::sync::Mutex<dyn RootHandler>>));
 		Ok(())
 	}
 
@@ -389,8 +399,9 @@ async fn fusion_client_life_cycle() {
 	let (client, event_loop) = Client::connect_with_async_loop().await.unwrap();
 
 	struct RootHandlerDummy(Arc<Client>);
+	#[crate::handler]
 	impl RootHandler for RootHandlerDummy {
-		fn frame(&mut self, _info: FrameInfo) {
+		async fn frame(&mut self, _info: FrameInfo) {
 			self.0.stop_loop();
 		}
 		fn save_state(&mut self) -> ClientState {

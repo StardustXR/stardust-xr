@@ -69,8 +69,8 @@ pub trait NodeType: Send + Sync + 'static {
 /// A trait to ensure this node type could be put in a `HandlerWrapper`.
 pub trait HandledNodeType: NodeType {}
 
-type Signal = dyn Fn(&[u8], Vec<OwnedFd>) -> color_eyre::eyre::Result<()> + Send + Sync + 'static;
-type Method = dyn Fn(&[u8], Vec<OwnedFd>) -> color_eyre::eyre::Result<(Vec<u8>, Vec<OwnedFd>)>
+type Signal = dyn Fn(Vec<u8>, Vec<OwnedFd>) -> color_eyre::eyre::Result<()> + Send + Sync + 'static;
+type Method = dyn Fn(Vec<u8>, Vec<OwnedFd>) -> color_eyre::eyre::Result<(Vec<u8>, Vec<OwnedFd>)>
 	+ Send
 	+ Sync
 	+ 'static;
@@ -166,7 +166,7 @@ impl Node {
 	/// Add a signal to the node so that the server can send a message to it. Not needed unless implementing functionality Fusion does not already have.
 	pub fn add_local_signal<F>(&self, name: impl ToString, signal: F) -> Result<(), NodeError>
 	where
-		F: Fn(&[u8], Vec<OwnedFd>) -> color_eyre::eyre::Result<()> + Send + Sync + 'static,
+		F: Fn(Vec<u8>, Vec<OwnedFd>) -> color_eyre::eyre::Result<()> + Send + Sync + 'static,
 	{
 		self.internals()?
 			.local_signals
@@ -178,7 +178,7 @@ impl Node {
 	/// Add a signal to the node so that the server can send a message to it and get a response back. Not needed unless implementing functionality Fusion does not already have.
 	pub fn add_local_method<F>(&self, name: impl ToString, method: F) -> Result<(), NodeError>
 	where
-		F: Fn(&[u8], Vec<OwnedFd>) -> color_eyre::eyre::Result<(Vec<u8>, Vec<OwnedFd>)>
+		F: Fn(Vec<u8>, Vec<OwnedFd>) -> color_eyre::eyre::Result<(Vec<u8>, Vec<OwnedFd>)>
 			+ Send
 			+ Sync
 			+ 'static,

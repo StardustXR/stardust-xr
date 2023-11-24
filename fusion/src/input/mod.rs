@@ -25,6 +25,7 @@ mod tip;
 pub use pointer::PointerInputMethod;
 pub use stardust_xr::schemas::flat::*;
 pub use tip::TipInputMethod;
+use tokio::sync::Mutex;
 
 use super::{
 	fields::Field,
@@ -34,9 +35,8 @@ use super::{
 };
 use crate::fields::UnknownField;
 use color_eyre::eyre::{anyhow, bail};
-use parking_lot::Mutex;
 use stardust_xr::{
-	schemas::flex::{deserialize, flexbuffers},
+	schemas::flex::{deserialize_owned, flexbuffers},
 	values::Transform,
 };
 use std::{ops::Deref, os::fd::OwnedFd, sync::Arc};
@@ -51,7 +51,7 @@ pub(self) fn input_method_handler_wrapper<N: InputMethod, H: InputMethodHandler>
 		let Ok(path) = node.node().get_path() else {
 			bail!("no path??")
 		};
-		let uid: String = deserialize(data)?;
+		let uid: String = deserialize_owned(data)?;
 
 		let node = Node::from_path(&client, &path, &uid, false);
 		let spatial = Spatial { node };
@@ -61,12 +61,18 @@ pub(self) fn input_method_handler_wrapper<N: InputMethod, H: InputMethodHandler>
 			},
 		};
 		let input_handler = InputHandler { spatial, field };
-		handler.lock().create_handler(&uid, input_handler);
+		tokio::spawn(async move {
+			handler
+				.lock()
+				.await
+				.create_handler(uid, input_handler)
+				.await
+		});
 		Ok(())
 	})?;
 	handler_wrapper.add_handled_signal("handler_destroyed", |_node, handler, data, _fds| {
-		let uid = deserialize(data)?;
-		handler.lock().drop_handler(uid);
+		let uid: String = deserialize_owned(data)?;
+		tokio::spawn(async move { handler.lock().await.drop_handler(uid).await });
 		Ok(())
 	})?;
 
@@ -92,15 +98,17 @@ pub trait InputMethod: HandledNodeType {
 	}
 }
 
+#[crate::handler]
 pub trait InputMethodHandler: Send + Sync {
-	fn create_handler(&mut self, uid: &str, handler: InputHandler);
-	fn drop_handler(&mut self, uid: &str);
+	async fn create_handler(&mut self, uid: String, handler: InputHandler);
+	async fn drop_handler(&mut self, uid: String);
 }
 
 /// Handle raw input events.
+#[crate::handler]
 pub trait InputHandlerHandler: Send + Sync {
 	/// An input method has sent an input event on this frame.
-	fn input(&mut self, input: UnknownInputMethod, data: InputData);
+	async fn input(&mut self, input: UnknownInputMethod, data: InputData);
 }
 
 /// An input method on the server, but the type is unknown.
@@ -199,17 +207,18 @@ impl<'a> InputHandler {
 		Ok(handler_wrapper)
 	}
 
-	fn handle_input<H: InputHandlerHandler>(
+	fn handle_input<H: InputHandlerHandler + 'static>(
 		input_handler: Arc<InputHandler>,
 		handler: Arc<Mutex<H>>,
-		data: &[u8],
+		data: Vec<u8>,
 		_fds: Vec<OwnedFd>,
 	) -> color_eyre::eyre::Result<()> {
-		let data = InputData::deserialize(data).map_err(|e| anyhow!(e))?;
-		handler.lock().input(
-			UnknownInputMethod::from_path(input_handler, &data.uid)?,
-			data,
-		);
+		let data = InputData::deserialize(&data).map_err(|e| anyhow!(e))?;
+
+		let input_method = UnknownInputMethod::from_path(input_handler, &data.uid)?;
+		tokio::task::spawn(async move {
+			handler.lock().await.input(input_method, data).await;
+		});
 		Ok(())
 	}
 
@@ -251,8 +260,9 @@ async fn fusion_input_handler() {
 			.unwrap();
 
 	struct InputHandlerTest;
+	#[crate::handler]
 	impl InputHandlerHandler for InputHandlerTest {
-		fn input(&mut self, _input: UnknownInputMethod, data: InputData) {
+		async fn input(&mut self, _input: UnknownInputMethod, data: InputData) {
 			dbg!(data.uid);
 			dbg!(data.distance);
 			match &data.input {

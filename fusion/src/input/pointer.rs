@@ -4,12 +4,12 @@ use crate::{
 	spatial::Spatial,
 	HandlerWrapper,
 };
-use parking_lot::Mutex;
 use stardust_xr::{
 	schemas::flex::flexbuffers::{self},
 	values::Transform,
 };
 use std::{ops::Deref, sync::Arc};
+use tokio::sync::Mutex;
 
 /// Virtual spatial input device representing a ray/pointer (e.g. eye gaze, 3DoF controller)
 #[derive(Debug)]
@@ -121,8 +121,9 @@ async fn fusion_pointer_input_method() {
 		model: Model,
 		datamap: Datamap,
 	}
+	#[crate::handler]
 	impl crate::client::RootHandler for PointerDemo {
-		fn frame(&mut self, info: FrameInfo) {
+		async fn frame(&mut self, info: FrameInfo) {
 			let (sin, cos) = (info.elapsed as f32).sin_cos();
 			self.pointer
 				.set_position(None, mint::Vector3::from([sin * 0.1, 0.0, cos * 0.1]))

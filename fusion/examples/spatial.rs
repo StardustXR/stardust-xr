@@ -49,8 +49,9 @@ impl SpatialDemo {
 		}
 	}
 }
+#[stardust_xr_fusion::handler]
 impl RootHandler for SpatialDemo {
-	fn frame(&mut self, info: FrameInfo) {
+	async fn frame(&mut self, info: FrameInfo) {
 		let elapsed = info.elapsed as f32;
 
 		self.gem

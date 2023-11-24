@@ -21,6 +21,7 @@
 pub mod camera;
 mod environment;
 pub use environment::*;
+use tokio::sync::Mutex;
 
 pub mod panel;
 
@@ -34,12 +35,10 @@ use crate::{
 	spatial::Spatial,
 	HandlerWrapper,
 };
-use color_eyre::eyre::{anyhow, Result};
-use parking_lot::{Mutex, RwLock, RwLockReadGuard};
-use rustc_hash::FxHashMap;
+use color_eyre::eyre::Result;
 use serde::de::DeserializeOwned;
 use stardust_xr::{
-	schemas::flex::{deserialize, serialize},
+	schemas::flex::{deserialize_owned, serialize},
 	values::Transform,
 };
 use std::{any::TypeId, marker::PhantomData, ops::Deref, os::fd::OwnedFd, sync::Arc};
@@ -65,25 +64,26 @@ pub trait Item: NodeType + Send + Sync + 'static {
 
 /// Handler for the ItemUI item.
 #[allow(unused_variables)]
+#[crate::handler]
 pub trait ItemUIHandler<I: Item>: Send + Sync + 'static {
 	/// A new item of the `I` type has been created with the given init data and `uid`. `item` is an aliased node to the real item.
-	fn item_created(&mut self, item_uid: &str, item: I, init_data: I::InitData) {}
+	async fn item_created(&mut self, item_uid: String, item: I, init_data: I::InitData) {}
 	/// The item with `uid` has been captured by the item acceptor. `item` is an aliased node to the real item.
-	fn item_captured(&mut self, item_uid: &str, acceptor_uid: &str) {}
+	async fn item_captured(&mut self, item_uid: String, acceptor_uid: String) {}
 	/// The item with `uid` has been released by the item acceptor. `item` is an aliased node to the real item.
-	fn item_released(&mut self, item_uid: &str, acceptor_uid: &str) {}
+	async fn item_released(&mut self, item_uid: String, acceptor_uid: String) {}
 	/// The item with `uid` has been destroyed.
-	fn item_destroyed(&mut self, item_uid: &str) {}
+	async fn item_destroyed(&mut self, item_uid: String) {}
 	/// The item acceptor with `uid` has been created. `acceptor` is an aliased node to the acceptor.
-	fn acceptor_created(
+	async fn acceptor_created(
 		&mut self,
-		acceptor_uid: &str,
+		acceptor_uid: String,
 		acceptor: ItemAcceptor<I>,
 		field: UnknownField,
 	) {
 	}
 	/// The item acceptor with `uid` has been destroyed.
-	fn acceptor_destroyed(&mut self, acceptor_uid: &str) {}
+	async fn acceptor_destroyed(&mut self, acceptor_uid: String) {}
 }
 
 /// Node to get all items and acceptors to make a UI around the items.
@@ -153,10 +153,10 @@ impl<I: Item> ItemUI<I> {
 	fn handle_create_item<H: ItemUIHandler<I>>(
 		ui: Arc<ItemUI<I>>,
 		handler: Arc<Mutex<H>>,
-		data: &[u8],
+		data: Vec<u8>,
 		_fds: Vec<OwnedFd>,
 	) -> Result<()> {
-		let (uid, init_data): (&str, I::InitData) = deserialize(data)?;
+		let (uid, init_data): (String, I::InitData) = deserialize_owned(data)?;
 
 		let item = I::from_path(
 			&ui.client()?,
@@ -165,51 +165,69 @@ impl<I: Item> ItemUI<I> {
 			&init_data,
 		);
 		let item_aliased = item.alias();
-		handler.lock().item_created(uid, item_aliased, init_data);
+		tokio::task::spawn(async move {
+			handler
+				.lock()
+				.await
+				.item_created(uid, item_aliased, init_data)
+				.await
+		});
 		Ok(())
 	}
 	fn handle_capture_item<H: ItemUIHandler<I>>(
 		_ui: Arc<ItemUI<I>>,
 		handler: Arc<Mutex<H>>,
-		data: &[u8],
+		data: Vec<u8>,
 		_fds: Vec<OwnedFd>,
 	) -> Result<()> {
-		let (item_uid, acceptor_uid): (&str, &str) = deserialize(data)?;
-		handler.lock().item_captured(item_uid, acceptor_uid);
+		let (item_uid, acceptor_uid): (String, String) = deserialize_owned(data)?;
+		tokio::task::spawn(async move {
+			handler
+				.lock()
+				.await
+				.item_captured(item_uid, acceptor_uid)
+				.await
+		});
 		Ok(())
 	}
 	fn handle_release_item<H: ItemUIHandler<I>>(
 		_ui: Arc<ItemUI<I>>,
 		handler: Arc<Mutex<H>>,
-		data: &[u8],
+		data: Vec<u8>,
 		_fds: Vec<OwnedFd>,
 	) -> Result<()> {
-		let (item_uid, acceptor_uid): (&str, &str) = deserialize(data)?;
-		handler.lock().item_released(item_uid, acceptor_uid);
+		let (item_uid, acceptor_uid): (String, String) = deserialize_owned(data)?;
+		tokio::task::spawn(async move {
+			handler
+				.lock()
+				.await
+				.item_released(item_uid, acceptor_uid)
+				.await
+		});
 		Ok(())
 	}
 	fn handle_destroy_item<H: ItemUIHandler<I>>(
 		_ui: Arc<ItemUI<I>>,
 		handler: Arc<Mutex<H>>,
-		data: &[u8],
+		data: Vec<u8>,
 		_fds: Vec<OwnedFd>,
 	) -> Result<()> {
-		let uid: &str = deserialize(data)?;
-		handler.lock().item_destroyed(uid);
+		let uid: String = deserialize_owned(data)?;
+		tokio::task::spawn(async move { handler.lock().await.item_destroyed(uid).await });
 		Ok(())
 	}
 
 	fn handle_create_acceptor<H: ItemUIHandler<I>>(
 		ui: Arc<ItemUI<I>>,
 		handler: Arc<Mutex<H>>,
-		data: &[u8],
+		data: Vec<u8>,
 		_fds: Vec<OwnedFd>,
 	) -> Result<()> {
-		let uid: &str = deserialize(data)?;
+		let uid: String = deserialize_owned(data)?;
 
 		let client = ui.client()?;
-		let acceptor: ItemAcceptor<I> =
-			ItemAcceptor::from_path(&client, format!("/item/{}/acceptor", I::TYPE_NAME), &uid);
+		let acceptor =
+			ItemAcceptor::<I>::from_path(&client, format!("/item/{}/acceptor", I::TYPE_NAME), &uid);
 		let field = UnknownField {
 			spatial: Spatial::from_path(
 				&client,
@@ -220,19 +238,23 @@ impl<I: Item> ItemUI<I> {
 		};
 		let acceptor_aliased = acceptor.alias();
 		let field_aliased = field.alias();
-		handler
-			.lock()
-			.acceptor_created(uid, acceptor_aliased, field_aliased);
+		tokio::task::spawn(async move {
+			handler
+				.lock()
+				.await
+				.acceptor_created(uid, acceptor_aliased, field_aliased)
+				.await
+		});
 		Ok(())
 	}
 	fn handle_destroy_acceptor<H: ItemUIHandler<I>>(
 		_ui: Arc<ItemUI<I>>,
 		handler: Arc<Mutex<H>>,
-		data: &[u8],
+		data: Vec<u8>,
 		_fds: Vec<OwnedFd>,
 	) -> Result<()> {
-		let uid: &str = deserialize(data)?;
-		handler.lock().acceptor_destroyed(uid);
+		let uid: String = deserialize_owned(data)?;
+		tokio::task::spawn(async move { handler.lock().await.acceptor_destroyed(uid).await });
 		Ok(())
 	}
 }
@@ -261,17 +283,18 @@ impl<I: Item> Drop for ItemUI<I> {
 
 /// Handler for the ItemAcceptor node.
 #[allow(unused_variables)]
+#[crate::handler]
 pub trait ItemAcceptorHandler<I: Item>: Send + Sync + 'static {
 	/// Item `item` with unique ID `uid` has been captured into this acceptor with `init_data`.
-	fn captured(&mut self, uid: &str, item: I, init_data: I::InitData) {}
+	async fn captured(&mut self, uid: String, item: I, init_data: I::InitData) {}
 	/// Item with unique ID `uid` has been released from this acceptor.
-	fn released(&mut self, uid: &str) {}
+	async fn released(&mut self, uid: String) {}
 }
 
 /// Node that can borrow items for a bit (capturing).
 pub struct ItemAcceptor<I: Item> {
+	ty: PhantomData<I>,
 	spatial: Spatial,
-	captured_items: Arc<RwLock<FxHashMap<String, I>>>,
 }
 impl<I: Item> ItemAcceptor<I> {
 	/// Create a new item acceptor. Field can be dropped and the acceptor will still work.
@@ -282,6 +305,7 @@ impl<I: Item> ItemAcceptor<I> {
 	) -> Result<ItemAcceptor<I>, NodeError> {
 		let id = nanoid::nanoid!();
 		let item_acceptor = ItemAcceptor::<I> {
+			ty: PhantomData::default(),
 			spatial: Spatial {
 				node: Node::new(
 					&spatial_parent.node.client()?,
@@ -299,33 +323,7 @@ impl<I: Item> ItemAcceptor<I> {
 					),
 				)?,
 			},
-			captured_items: Arc::new(RwLock::new(FxHashMap::default())),
 		};
-
-		item_acceptor.node().add_local_signal("capture", {
-			let client = Arc::downgrade(&spatial_parent.node().client()?);
-			let items = item_acceptor.captured_items.clone();
-			move |data, _fds| {
-				let (item_uid, init_data): (&str, I::InitData) = deserialize(data)?;
-
-				let item = I::from_path(
-					&client.upgrade().ok_or_else(|| anyhow!("Client dropped"))?,
-					&format!("/item/{}/item", I::TYPE_NAME),
-					item_uid,
-					&init_data,
-				);
-				items.write().insert(item_uid.to_string(), item);
-				Ok(())
-			}
-		})?;
-		item_acceptor.node().add_local_signal("release", {
-			let items = item_acceptor.captured_items.clone();
-			move |data, _fds| {
-				let name: &str = deserialize(data)?;
-				items.write().remove(name);
-				Ok(())
-			}
-		})?;
 
 		Ok(item_acceptor)
 	}
@@ -335,11 +333,11 @@ impl<I: Item> ItemAcceptor<I> {
 		parent: impl ToString,
 		name: impl ToString,
 	) -> ItemAcceptor<I> {
-		ItemAcceptor {
+		ItemAcceptor::<I> {
+			ty: Default::default(),
 			spatial: Spatial {
 				node: Node::from_path(client, parent, name, false),
 			},
-			captured_items: Arc::new(RwLock::new(FxHashMap::default())),
 		}
 	}
 
@@ -366,40 +364,30 @@ impl<I: Item> ItemAcceptor<I> {
 	fn handle_capture_item<H: ItemAcceptorHandler<I>>(
 		acceptor: Arc<ItemAcceptor<I>>,
 		handler: Arc<Mutex<H>>,
-		data: &[u8],
+		data: Vec<u8>,
 		_fds: Vec<OwnedFd>,
 	) -> Result<()> {
-		let (uid, init_data): (&str, I::InitData) = deserialize(data)?;
+		let (uid, init_data): (String, I::InitData) = deserialize_owned(data)?;
 		let item = I::from_path(
 			&acceptor.client()?,
 			&acceptor.node().get_path()?,
-			uid,
+			uid.clone(),
 			&init_data,
 		);
-		let item_aliased = item.alias();
-		acceptor
-			.captured_items
-			.write()
-			.insert(uid.to_string(), item);
-		handler.lock().captured(uid, item_aliased, init_data);
+		tokio::spawn(async move { handler.lock().await.captured(uid, item, init_data).await });
 		Ok(())
 	}
 	fn handle_release_item<H: ItemAcceptorHandler<I>>(
-		acceptor: Arc<ItemAcceptor<I>>,
+		_acceptor: Arc<ItemAcceptor<I>>,
 		handler: Arc<Mutex<H>>,
-		data: &[u8],
+		data: Vec<u8>,
 		_fds: Vec<OwnedFd>,
 	) -> Result<()> {
-		let uid: &str = deserialize(data)?;
-		acceptor.captured_items.write().remove(uid);
-		handler.lock().released(uid);
+		let uid: String = deserialize_owned(data)?;
+		tokio::spawn(async move { handler.lock().await.released(uid).await });
 		Ok(())
 	}
 
-	/// Get all the captured items
-	pub fn captured_items(&self) -> RwLockReadGuard<FxHashMap<String, I>> {
-		self.captured_items.read()
-	}
 	/// Capture an item into the acceptor
 	pub fn capture(&self, item: &I) -> Result<(), NodeError> {
 		self.node()
@@ -411,9 +399,9 @@ impl<I: Item> NodeType for ItemAcceptor<I> {
 		&self.spatial.node
 	}
 	fn alias(&self) -> Self {
-		ItemAcceptor {
+		ItemAcceptor::<I> {
+			ty: Default::default(),
 			spatial: self.spatial.alias(),
-			captured_items: self.captured_items.clone(),
 		}
 	}
 }

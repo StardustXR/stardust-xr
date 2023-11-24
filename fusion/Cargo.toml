@@ -1,5 +1,6 @@
 [package]
 edition = "2021"
+rust-version = "1.74"
 name = "stardust-xr-fusion"
 version = "0.43.2"
 authors = ["Nova King <technobaboo@proton.me>"]
@@ -37,6 +38,7 @@ tracing = "0.1.37"
 enum_dispatch = "0.3.12"
 color-eyre = "0.6.2"
 serde_with = "3.4.0"
+async-trait = "0.1.74"
 
 [dev-dependencies]
 glam = { version = "0.24.1", features = ["mint"] }

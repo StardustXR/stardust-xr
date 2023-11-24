@@ -3,7 +3,8 @@ pub use flexbuffers;
 use flexbuffers::{BitWidth, DeserializationError, FlexBufferType, ReaderError, ReaderIterator};
 use serde::{
 	de::{
-		DeserializeSeed, EnumAccess, IntoDeserializer, MapAccess, SeqAccess, VariantAccess, Visitor,
+		DeserializeOwned, DeserializeSeed, EnumAccess, IntoDeserializer, MapAccess, SeqAccess,
+		VariantAccess, Visitor,
 	},
 	ser::{
 		SerializeMap, SerializeSeq, SerializeStruct, SerializeStructVariant, SerializeTuple,
@@ -976,6 +977,17 @@ impl<'b> SerializeMap for FlexMapSerializer<'b> {
 /// order to save space and speed up deserialization.
 pub fn deserialize<'a, T: Deserialize<'a>>(data: &'a [u8]) -> Result<T, DeserializationError> {
 	let root = flexbuffers::Reader::get_root(data)?;
+	let deserializer = FlexbuffersDeserializer(root);
+	T::deserialize(deserializer)
+}
+
+/// Deserialize given flexbuffers data into whatever format.
+/// This is different than the regular flexbuffers deserialization
+/// because it strips the names off of struct fields,
+/// instead putting the values into vectors with the same
+/// order to save space and speed up deserialization.
+pub fn deserialize_owned<T: DeserializeOwned>(data: Vec<u8>) -> Result<T, DeserializationError> {
+	let root = flexbuffers::Reader::get_root(data.as_slice())?;
 	let deserializer = FlexbuffersDeserializer(root);
 	T::deserialize(deserializer)
 }

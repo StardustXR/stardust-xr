@@ -1,21 +1,21 @@
+use super::Spatial;
 use crate::{
 	fields::Field,
 	node::{HandledNodeType, Node, NodeError, NodeType},
 	HandlerWrapper,
 };
-
-use super::Spatial;
 use color_eyre::eyre::Result;
-use parking_lot::Mutex;
-use stardust_xr::{schemas::flex::deserialize, values::Transform};
+use stardust_xr::{schemas::flex::deserialize_owned, values::Transform};
 use std::{ops::Deref, sync::Arc};
+use tokio::sync::Mutex;
 
 /// Hamdle spatials entering the zone's field, leaving it, being captured, and released.
+#[crate::handler]
 pub trait ZoneHandler: Send + Sync {
-	fn enter(&mut self, uid: &str, spatial: Spatial);
-	fn capture(&mut self, uid: &str);
-	fn release(&mut self, uid: &str);
-	fn leave(&mut self, uid: &str);
+	async fn enter(&mut self, uid: String, spatial: Spatial);
+	async fn capture(&mut self, uid: String);
+	async fn release(&mut self, uid: String);
+	async fn leave(&mut self, uid: String);
 }
 
 /// Node to manipulate spatial nodes across clients.
@@ -65,25 +65,29 @@ impl<'a> Zone {
 	) -> Result<HandlerWrapper<Self, H>, NodeError> {
 		let handler_wrapper = HandlerWrapper::new_raw(self, handler);
 		handler_wrapper.add_handled_signal("enter", |zone, handler, data, _| {
-			let uid: &str = deserialize(data)?;
-			let spatial =
-				Spatial::from_path(&zone.node().client()?, zone.node().get_path()?, uid, false);
-			handler.lock().enter(uid, spatial);
+			let uid: String = deserialize_owned(data)?;
+			let spatial = Spatial::from_path(
+				&zone.node().client()?,
+				zone.node().get_path()?,
+				uid.clone(),
+				false,
+			);
+			tokio::task::spawn(async move { handler.lock().await.enter(uid, spatial).await });
 			Ok(())
 		})?;
 		handler_wrapper.add_handled_signal("capture", |_zone, handler, data, _| {
-			let uid: &str = deserialize(data)?;
-			handler.lock().capture(uid);
+			let uid: String = deserialize_owned(data)?;
+			tokio::task::spawn(async move { handler.lock().await.capture(uid).await });
 			Ok(())
 		})?;
 		handler_wrapper.add_handled_signal("release", |_zone, handler, data, _| {
-			let uid: &str = deserialize(data)?;
-			handler.lock().release(uid);
+			let uid: String = deserialize_owned(data)?;
+			tokio::task::spawn(async move { handler.lock().await.release(uid).await });
 			Ok(())
 		})?;
 		handler_wrapper.add_handled_signal("leave", |_zone, handler, data, _| {
-			let uid: &str = deserialize(data)?;
-			handler.lock().leave(uid);
+			let uid: String = deserialize_owned(data)?;
+			tokio::task::spawn(async move { handler.lock().await.leave(uid).await });
 			Ok(())
 		})?;
 		Ok(handler_wrapper)
@@ -150,22 +154,23 @@ async fn fusion_zone() {
 		root: Spatial,
 		zone: Zone,
 	}
+	#[crate::handler]
 	impl ZoneHandler for ZoneTest {
-		fn enter(&mut self, uid: &str, spatial: Spatial) {
-			println!("Spatial {} entered zone", uid);
+		async fn enter(&mut self, uid: String, spatial: Spatial) {
+			println!("Spatial {uid} entered zone");
 			self.zone.capture(&spatial).unwrap();
 		}
-		fn capture(&mut self, uid: &str) {
-			println!("Spatial {} was captured", uid);
-			self.zone.release(uid).unwrap();
+		async fn capture(&mut self, uid: String) {
+			println!("Spatial {uid} was captured");
+			self.zone.release(&uid).unwrap();
 		}
-		fn release(&mut self, uid: &str) {
-			println!("Spatial {} was released", uid);
+		async fn release(&mut self, uid: String) {
+			println!("Spatial {uid} was released");
 			self.root.set_position(None, [0.0, 1.0, 0.0]).unwrap();
 			self.zone.update().unwrap();
 		}
-		fn leave(&mut self, uid: &str) {
-			println!("Spatial {} left zone", uid);
+		async fn leave(&mut self, uid: String) {
+			println!("Spatial {uid} left zone");
 			self.client.stop_loop();
 		}
 	}
